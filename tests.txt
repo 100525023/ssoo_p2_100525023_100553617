@@ -1,0 +1,20 @@
+## Uc3mshell P2
+
+# Test 1: Extreme Pipelining
+ls -l | grep .c | sort -r | wc -l > results.out !> error.log
+
+# Test 2: Background
+sleep 3 &
+echo "Foreground task"
+
+# Test 3: Echo quotes
+echo "Hello      World"
+echo Hello      World
+
+# Test 4: mycalc
+mycalc 10 / 0
+mycalc 5x + 3
+
+# Test 6: Exit
+sleep 2 &
+exit 59
