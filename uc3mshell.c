@@ -7,25 +7,25 @@
 #include <unistd.h>
 #include <signal.h>
 
-/* Limits for line length, number of piped commands, redirections and args */
+/* How long a line can be and how many commands we support */
 const int max_line       = 1024;
 const int max_commands   = 10;
 #define   max_redirections 3
 #define   max_args         15
 #define   MAX_PIPE_CMDS    10
 
-/* Global structures filled by procesar_linea and used by execute_commands */
-char *argvv[max_args];         /* argv-like array for the current command */
-char *filev[max_redirections]; /* redirection targets: [0]=in [1]=out [2]=err */
-int   background = 0;          /* 1 = run in background, 0 = foreground */
+/* These get populated by procesar_linea and read by execute_commands */
+char *argvv[max_args];         /* the current command's arguments */
+char *filev[max_redirections]; /* files to redirect: [0]=in [1]=out [2]=err */
+int   background = 0;          /* should we run this in the background? */
 
-/* Per-command storage: argv and redirections for each pipe segment */
+/* Stores the args and redirections for each command in a pipeline */
 static char *cmd_argv[MAX_PIPE_CMDS][max_args];
 static char *cmd_filev[MAX_PIPE_CMDS][max_redirections];
 
 /*
- * tokenizar_linea: splits 'linea' on 'delim' and stores the resulting
- * pointers in 'tokens'. Returns the number of tokens found.
+ * Splits 'linea' by 'delim' and fills 'tokens' with the pieces.
+ * Returns how many tokens we found.
  */
 int tokenizar_linea(char *linea, char *delim, char *tokens[], int max_tokens) {
     int i = 0;
@@ -39,8 +39,8 @@ int tokenizar_linea(char *linea, char *delim, char *tokens[], int max_tokens) {
 }
 
 /*
- * strip_quotes: removes surrounding double-quotes from a string in-place.
- * Used so that echo "Hello world" produces the same output as echo Hello world.
+ * If a string is wrapped in double quotes, pull them off.
+ * This way echo "Hello world" works the same as echo Hello world.
  */
 static void strip_quotes(char *s) {
     size_t len = strlen(s);
@@ -51,8 +51,8 @@ static void strip_quotes(char *s) {
 }
 
 /*
- * reap_background: non-blocking wait to collect finished background children
- * and prevent zombie processes. Called after every foreground command.
+ * Do a quick non-blocking sweep for any background children that have
+ * finished, so they don't pile up as zombies.
  */
 static void reap_background(void) {
     int status;
@@ -61,8 +61,8 @@ static void reap_background(void) {
 }
 
 /*
- * sigchld_handler: called automatically when a child process finishes.
- * Reaps all available children so we never accumulate zombies.
+ * Triggered whenever a child process dies. Cleans up immediately so
+ * we never end up with zombie processes hanging around.
  */
 static void sigchld_handler(int sig) {
     (void)sig;
@@ -72,10 +72,10 @@ static void sigchld_handler(int sig) {
 }
 
 /*
- * parse_one_command: tokenises one pipe segment and fills cmd_argv[idx] and
- * cmd_filev[idx]. Redirection tokens (<, >, !>) and their filenames are
- * stripped from the argument list so that execvp gets a clean argv.
- * Returns the number of arguments in the command.
+ * Parses one segment of a pipeline (the stuff between two pipes).
+ * Pulls out any redirections (<, >, !>) and their filenames, then
+ * leaves cmd_argv with just the actual command and its arguments.
+ * Returns the number of arguments.
  */
 static int parse_one_command(int idx, char *segment) {
     int k;
@@ -98,6 +98,7 @@ static int parse_one_command(int idx, char *segment) {
             if (first_red == -1) first_red = k;
         }
     }
+    /* Chop off the redirection tokens so execvp never sees them */
     if (first_red != -1) {
         for (k = first_red; cmd_argv[idx][k] != NULL; k++)
             cmd_argv[idx][k] = NULL;
@@ -108,26 +109,28 @@ static int parse_one_command(int idx, char *segment) {
 }
 
 /*
- * execute_commands: runs num_comandos commands connected via pipes.
+ * The heart of the shell — runs a pipeline of num_comandos commands.
  *
- * For a single command a single fork is done. For N piped commands, N-1 pipes
- * are created and N children are forked. Child i reads from pipe[i-1] and
- * writes to pipe[i]. Stdin redirection applies only to the first command;
- * stdout and stderr redirections apply only to the last command.
+ * For a single command we just fork once. For a pipeline we set up N-1
+ * pipes and fork one child per command. Each child reads from the pipe
+ * on its left and writes to the pipe on its right.
  *
- * If background is set, the PID of the last process is printed and the shell
- * does not wait. Otherwise the shell waits for the last command to finish.
+ * stdin redirection only affects the first command; stdout and stderr
+ * redirections only affect the last one.
+ *
+ * Background jobs get their PID printed and we move on immediately.
+ * Foreground jobs block until the last command finishes.
  */
 static void execute_commands(char *comandos[], int num_comandos) {
     int i;
     int pipes[MAX_PIPE_CMDS - 1][2];
     pid_t pids[MAX_PIPE_CMDS];
 
-    /* Parse each pipe segment into per-command argv and redirections */
+    /* Break each pipe segment into a clean argv + redirection list */
     for (i = 0; i < num_comandos; i++)
         parse_one_command(i, comandos[i]);
 
-    /* Create the N-1 pipes needed to connect the commands */
+    /* Build all the pipes we need upfront */
     for (i = 0; i < num_comandos - 1; i++) {
         if (pipe(pipes[i]) < 0) {
             perror("uc3mshell: pipe");
@@ -137,7 +140,7 @@ static void execute_commands(char *comandos[], int num_comandos) {
 
     for (i = 0; i < num_comandos; i++) {
 
-        /* Skip completely empty segments */
+        /* Nothing to run here, skip it */
         if (cmd_argv[i][0] == NULL) {
             if (i < num_comandos - 1) {
                 close(pipes[i][0]);
@@ -147,7 +150,7 @@ static void execute_commands(char *comandos[], int num_comandos) {
             continue;
         }
 
-        /* --- Internal command: mycalc --- */
+        /* Built-in: mycalc — handle it directly, no fork needed */
         if (strcmp(cmd_argv[i][0], "mycalc") == 0) {
             int ac = 0;
             while (cmd_argv[i][ac] != NULL) ac++;
@@ -158,7 +161,7 @@ static void execute_commands(char *comandos[], int num_comandos) {
             continue;
         }
 
-        /* --- Internal command: exit --- */
+        /* Built-in: exit — validate the code, wait for background jobs, then leave */
         if (strcmp(cmd_argv[i][0], "exit") == 0) {
             if (cmd_argv[i][1] == NULL) {
                 fprintf(stderr, "[ERROR] Missing exit code\n");
@@ -184,10 +187,11 @@ static void execute_commands(char *comandos[], int num_comandos) {
             exit((int)code);
         }
 
-        /* --- Fork a child for external commands --- */
+        /* Everything else: fork a child and let execvp take over */
         pid_t pid = fork();
         if (pid < 0) {
             perror("uc3mshell: fork");
+            /* Something went wrong — close remaining pipes and bail */
             int j;
             for (j = i; j < num_comandos - 1; j++) {
                 close(pipes[j][0]);
@@ -197,10 +201,12 @@ static void execute_commands(char *comandos[], int num_comandos) {
         }
 
         if (pid == 0) {
-            /* Child: restore default SIGCHLD so execvp'd programs behave normally */
+            /* Child process starts here */
+
+            /* Let execvp'd programs handle SIGCHLD their own way */
             signal(SIGCHLD, SIG_DFL);
 
-            /* Connect stdin to the previous pipe (not for the first command) */
+            /* Wire up stdin to the previous pipe (skip for the first command) */
             if (i > 0) {
                 if (dup2(pipes[i-1][0], STDIN_FILENO) < 0) {
                     perror("uc3mshell: dup2 pipe stdin");
@@ -208,7 +214,7 @@ static void execute_commands(char *comandos[], int num_comandos) {
                 }
             }
 
-            /* Connect stdout to the next pipe (not for the last command) */
+            /* Wire up stdout to the next pipe (skip for the last command) */
             if (i < num_comandos - 1) {
                 if (dup2(pipes[i][1], STDOUT_FILENO) < 0) {
                     perror("uc3mshell: dup2 pipe stdout");
@@ -216,16 +222,16 @@ static void execute_commands(char *comandos[], int num_comandos) {
                 }
             }
 
-            /* Close all pipe ends in the child – they have been dup2'd already */
+            /* Close every pipe end — we've already dup2'd the ones we need */
             int j;
             for (j = 0; j < num_comandos - 1; j++) {
                 close(pipes[j][0]);
                 close(pipes[j][1]);
             }
 
-            /* Apply file redirections.
-             * Stdin redirection applies only to the first command.
-             * Stdout and stderr redirections apply only to the last command. */
+            /* Hook up any file redirections.
+             * Only the first command can redirect stdin.
+             * Only the last command can redirect stdout/stderr. */
             if (i == 0 && cmd_filev[i][0] != NULL) {
                 int fd = open(cmd_filev[i][0], O_RDONLY);
                 if (fd < 0) { perror("uc3mshell: open stdin"); exit(-1); }
@@ -247,9 +253,9 @@ static void execute_commands(char *comandos[], int num_comandos) {
                 }
             }
 
-            /* Special case: echo "Hello world" must behave like echo Hello world.
-             * When the line is tokenised on spaces, "Hello world" becomes two
-             * tokens: '"Hello' and 'world"'. We reassemble them and strip quotes. */
+            /* echo "Hello world" quirk: because we split on spaces, the quoted
+             * string arrives as two tokens '"Hello' and 'world"'. We glue them
+             * back together and strip the quotes before calling execvp. */
             if (strcmp(cmd_argv[i][0], "echo") == 0) {
                 int k;
                 for (k = 1; cmd_argv[i][k] != NULL; k++) {
@@ -282,7 +288,7 @@ static void execute_commands(char *comandos[], int num_comandos) {
             exit(-1);
         }
 
-        /* Parent: record the child PID and close pipe ends no longer needed */
+        /* Back in the parent — save the PID and close the pipe we no longer need */
         pids[i] = pid;
         if (i > 0) {
             close(pipes[i-1][0]);
@@ -290,14 +296,14 @@ static void execute_commands(char *comandos[], int num_comandos) {
         }
     }
 
-    /* Close the last remaining pipe pair (if any) */
+    /* Clean up the last open pipe pair */
     if (num_comandos > 1) {
         close(pipes[num_comandos - 2][0]);
         close(pipes[num_comandos - 2][1]);
     }
 
     if (background) {
-        /* Print the PID of the last forked process as required by the spec */
+        /* Print the PID of the last process and let it run on its own */
         for (i = num_comandos - 1; i >= 0; i--) {
             if (pids[i] > 0) {
                 printf("%d", pids[i]);
@@ -305,9 +311,9 @@ static void execute_commands(char *comandos[], int num_comandos) {
                 break;
             }
         }
-        /* Do not wait – the SIGCHLD handler will reap the child when it finishes */
+        /* SIGCHLD will take care of reaping it when it's done */
     } else {
-        /* Foreground: wait for the last command to finish, reap the rest */
+        /* Foreground: block on the last command, do a quick wait on the rest */
         for (i = 0; i < num_comandos; i++) {
             if (pids[i] > 0) {
                 int status;
@@ -317,22 +323,22 @@ static void execute_commands(char *comandos[], int num_comandos) {
                     waitpid(pids[i], &status, WNOHANG);
             }
         }
-        /* Clean up any background zombies that finished while we were waiting */
+        /* Sweep up any background zombies that snuck in while we were waiting */
         reap_background();
     }
 }
 
 /*
- * procesar_linea: splits a shell line on '|', detects a trailing '&',
- * then calls execute_commands to run the pipeline.
- * Returns the number of pipe-separated commands found.
+ * Splits the line on '|' to find pipeline segments, checks for a
+ * trailing '&' (background), then hands everything off to execute_commands.
+ * Returns how many commands were in the pipeline.
  */
 int procesar_linea(char *linea) {
     char *comandos[max_commands];
     int num_comandos = tokenizar_linea(linea, "|", comandos, max_commands);
     background = 0;
 
-    /* A trailing '&' anywhere in the last segment means background execution */
+    /* A '&' anywhere in the last segment means "run in the background" */
     if (num_comandos > 0) {
         char *pos = strchr(comandos[num_comandos - 1], '&');
         if (pos != NULL) {
@@ -351,9 +357,9 @@ int procesar_linea(char *linea) {
 }
 
 /*
- * main: opens the script file, validates the mandatory header line, then
- * reads the file character by character dispatching each line to
- * procesar_linea. Empty lines and lines starting with '#' are skipped.
+ * Entry point. Opens the script file, checks that it starts with the
+ * right header, then reads it line by line and runs each one.
+ * Blank lines and lines starting with '#' are ignored.
  */
 int main(int argc, char *argv[]) {
 
@@ -362,7 +368,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    /* Install the SIGCHLD handler to reap background children automatically */
+    /* Catch child exits automatically so background jobs clean themselves up */
     struct sigaction sa;
     sa.sa_handler = sigchld_handler;
     sigemptyset(&sa.sa_mask);
@@ -378,7 +384,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    /* Read and validate the mandatory header line "## Uc3mshell P2" */
+    /* Every valid script must start with "## Uc3mshell P2" */
     char header[max_line];
     int  hlen = 0;
     char ch;
@@ -388,7 +394,7 @@ int main(int argc, char *argv[]) {
         header[hlen++] = ch;
     header[hlen] = '\0';
 
-    /* Tolerate Windows-style line endings */
+    /* Trim the '\r' in case this came from a Windows machine */
     if (hlen > 0 && header[hlen - 1] == '\r')
         header[--hlen] = '\0';
 
@@ -398,7 +404,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    /* Main loop: read lines character by character */
+    /* Read the rest of the file one character at a time, building up lines */
     char line[max_line];
     int  llen = 0;
 
@@ -406,11 +412,11 @@ int main(int argc, char *argv[]) {
         if (ch == '\n') {
             line[llen] = '\0';
 
-            /* Strip trailing '\r' for Windows-style line endings */
+            /* Again, handle Windows line endings gracefully */
             if (llen > 0 && line[llen - 1] == '\r')
                 line[--llen] = '\0';
 
-            /* Skip empty lines and comment lines */
+            /* Skip blank lines and comments */
             if (llen == 0 || line[0] == '#') {
                 llen = 0;
                 continue;
@@ -419,13 +425,13 @@ int main(int argc, char *argv[]) {
             procesar_linea(line);
             llen = 0;
         } else {
-            /* Guard against line buffer overflow */
+            /* Don't overflow the buffer */
             if (llen < max_line - 1)
                 line[llen++] = ch;
         }
     }
 
-    /* Handle a final line with no trailing newline */
+    /* Run the last line even if there's no newline at the end of the file */
     if (llen > 0) {
         line[llen] = '\0';
         if (line[0] != '#')
