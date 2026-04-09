@@ -1,20 +1,67 @@
 ## Uc3mshell P2
 
-# Test 1: Extreme Pipelining
-ls -l | grep .c | sort -r | wc -l > results.out !> error.log
+# Test 1: Simple command
+ls -l
 
-# Test 2: Background
-sleep 3 &
-echo "Foreground task"
+# Test 2: Simple background command
+sleep 1 &
+echo foreground after background
 
-# Test 3: Echo quotes
-echo "Hello      World"
-echo Hello      World
+# Test 3: Output redirection
+echo hello world > out.txt
 
-# Test 4: mycalc
+# Test 4: Input redirection (reads the file we just created)
+cat < out.txt
+
+# Test 5: Error redirection
+ls /nonexistent_dir !> err.txt
+
+# Test 6: Two-command pipeline
+ls -l | wc -l
+
+# Test 7: Three-command pipeline (bonus unlimited pipes)
+ls -l | grep c | wc -l
+
+# Test 8: Four-command pipeline (tests unlimited pipe support)
+ls -l | sort -r | grep c | wc -l
+
+# Test 9: Pipeline with output redirection on last command
+ls -l | sort > sorted.txt
+
+# Test 10: Pipeline with input and output redirection
+cat < out.txt | wc -c > charcount.txt
+
+# Test 11: mycalc valid operations
+mycalc 10 + 5
+mycalc 10 - 3
+mycalc 4 x 3
+mycalc 20 / 4
+
+# Test 12: mycalc error cases
 mycalc 10 / 0
 mycalc 5x + 3
+mycalc 10 + 
 
-# Test 6: Exit
-sleep 2 &
+# Test 13: echo with quotes (must match echo without quotes)
+echo "Hello world"
+echo Hello world
+
+# Test 14: mycp - copy a file
+mycp out.txt copy.txt
+cat copy.txt
+
+# Test 15: mycp error - source does not exist
+mycp doesnotexist.txt copy2.txt
+
+# Test 16: Background pipeline
+ls -l | sort &
+
+# Test 17: exit with non-integer
+exit pepe
+
+# Test 18: exit without argument
+exit
+
+# Test 19: exit with valid code (shell stops here)
+sleep 1 &
 exit 59
